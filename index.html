@@ -31,8 +31,10 @@ html,body { height:100%; background:var(--bg); color:var(--fg); font-family:sans
 <div id="bar">
   <button id="zoom" type="button">🔍 확대</button>
   <button id="torch" type="button">🔦 불</button>
+  <button id="photo" type="button">📷 사진으로</button>
   <button id="back" type="button" class="main">직접 입력으로</button>
 </div>
+<input type="file" id="cam" accept="image/*" capture="environment" style="display:none">
 <script>
 /* 벌크 재고이동 — 렉 QR 스캔 화면 (https://ohlog-wms.github.io/qr/)
    구글 웹앱 화면 안에서는 카메라가 막혀서, 스캔만 이 화면에서 하고
@@ -119,8 +121,7 @@ function tick() {
     if (frame % 10 === 0) info.textContent = engineNote + " · " + v.videoWidth + "x" + v.videoHeight + " · " + frame + (zoomOn ? " · 2배" : "");
     if (!s && !hinted && Date.now() - t0 > 4000) {
       hinted = true;
-      msg.innerHTML = "흐리게 보이면 <b>핸드폰을 20~30cm 뒤로</b> 빼세요" + (zoomCap ? " (2배 확대라 QR 은 충분히 크게 보입니다)" : "") + "<br>화면을 톡 누르면 초점을 다시 잡습니다";
-      if (zoomCap && !zoomOn) setZoom(true);
+      msg.innerHTML = "흐리면 <b>화면을 톡</b> 눌러 초점을 다시 잡거나<br>아래 <b>📷 사진으로</b> 를 눌러 찍으세요 (기본 카메라라 또렷합니다)";
     }
     if (s) go(s); else setTimeout(tick, 60);
   }).catch(function () { det = null; engineNote = "jsQR"; setTimeout(tick, 100); });
@@ -159,14 +160,76 @@ function refocus() {
 }
 v.addEventListener("click", refocus); box.addEventListener("click", refocus);
 box.style.pointerEvents = "auto";
+var CAM_ID_KEY = "rackScanCamId";
+function chooseMainBack(s) {
+  if (!navigator.mediaDevices.enumerateDevices) return s;
+  var cur = s.getVideoTracks()[0], curId = (cur.getSettings && cur.getSettings().deviceId) || "";
+  return navigator.mediaDevices.enumerateDevices().then(function (list) {
+    var backs = list.filter(function (d) { return d.kind === "videoinput" && /back|rear|environment|후면/i.test(d.label || ""); });
+    if (backs.length < 2) { if (curId) try { localStorage.setItem(CAM_ID_KEY, curId); } catch (e) {} return s; }
+    var num = function (d) { var m = /(\d+)/.exec(d.label || ""); return m ? parseInt(m[1], 10) : 99; };
+    backs.sort(function (a, b) { return num(a) - num(b); });
+    var main = backs[0];
+    if (!main.deviceId || main.deviceId === curId) { try { localStorage.setItem(CAM_ID_KEY, curId); } catch (e) {} return s; }
+    s.getTracks().forEach(function (t) { t.stop(); });
+    return navigator.mediaDevices.getUserMedia({ audio: false, video: {
+        deviceId: { exact: main.deviceId }, width: { ideal: 1920 }, height: { ideal: 1080 },
+        advanced: [{ focusMode: "continuous" }] } })
+      .then(function (s2) { try { localStorage.setItem(CAM_ID_KEY, main.deviceId); } catch (e) {} return s2; });
+  }).catch(function () { return s; });
+}
+/* 📷 사진으로 — 핸드폰 기본 카메라로 찍은 사진에서 읽는다 (기본 카메라는 초점을 잘 잡는다) */
+function readPhoto(file) {
+  return createImageBitmap(file).then(function (bmp) {
+    var tryJs = function () {
+      if (!window.jsQR) return "";
+      var sizes = [1600, 1000, 2400, 700];
+      for (var i = 0; i < sizes.length; i++) {
+        var k = Math.min(1, sizes[i] / Math.max(bmp.width, bmp.height)), w = Math.round(bmp.width * k), h = Math.round(bmp.height * k);
+        var c2 = document.createElement("canvas"); c2.width = w; c2.height = h;
+        var g = c2.getContext("2d"); g.drawImage(bmp, 0, 0, w, h);
+        var r = jsQR(g.getImageData(0, 0, w, h).data, w, h, { inversionAttempts: "attemptBoth" });
+        if (r) { var s = parseLoc(r.data); if (s) return s; }
+      }
+      return "";
+    };
+    if (det) return det.detect(bmp).then(function (l) { return pickCenter(l, bmp.width, bmp.height) || tryJs(); }).catch(tryJs);
+    return tryJs();
+  });
+}
+var camInput = document.getElementById("cam");
+document.getElementById("photo").onclick = function () {
+  try { stream && stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
+  stream = null; camInput.value = ""; camInput.click();
+};
+camInput.addEventListener("change", function () {
+  var f = this.files && this.files[0]; if (!f) { start(); return; }
+  msg.textContent = "사진에서 QR 읽는 중...";
+  readPhoto(f).then(function (s) {
+    if (s) go(s);
+    else { msg.textContent = "사진에서 렉 QR 을 못 찾았습니다. QR 하나만 크게 나오게 다시 찍어 주세요."; start(); }
+  }).catch(function () { msg.textContent = "사진을 읽지 못했습니다. 다시 찍어 주세요."; start(); });
+});
 function start() {
   if (done) return;
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     msg.textContent = "이 브라우저에서는 카메라를 쓸 수 없습니다. 크롬으로 열어 주세요."; return;
   }
-  navigator.mediaDevices.getUserMedia({ audio: false, video: {
-      facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 },
-      advanced: [{ focusMode: "continuous" }] } })
+  var saved = ""; try { saved = localStorage.getItem(CAM_ID_KEY) || ""; } catch (e) {}
+  var want = { width: { ideal: 1920 }, height: { ideal: 1080 }, advanced: [{ focusMode: "continuous" }] };
+  if (saved) want.deviceId = { exact: saved }; else want.facingMode = { ideal: "environment" };
+  navigator.mediaDevices.getUserMedia({ audio: false, video: want })
+    .catch(function (e) {   /* 저장해 둔 카메라가 없어졌으면 지우고 기본 후면으로 */
+      if (!saved) throw e;
+      try { localStorage.removeItem(CAM_ID_KEY); } catch (x) {}
+      delete want.deviceId; want.facingMode = { ideal: "environment" };
+      return navigator.mediaDevices.getUserMedia({ audio: false, video: want });
+    })
+    .then(function (s) {
+      /* ★2026-11-24(2): 렌즈가 여러 개인 폰은 '후면' 을 달라고 해도 광각(초점 고정) 렌즈를 주기도 한다 → 흐림.
+         후면 카메라 중 **주 렌즈**(삼성: "camera2 0, facing back" 처럼 번호가 가장 작은 것)를 골라 바꾼다. 한 번 고르면 기억. */
+      return chooseMainBack(s);
+    })
     .then(function (s) {
       stream = s; t0 = Date.now(); hinted = false; v.srcObject = s; var pl = v.play(); if (pl && pl.catch) pl.catch(function () {});
       msg.textContent = "QR 을 네모 가득 차게 — 흐리면 조금 떨어뜨리세요";
@@ -175,10 +238,13 @@ function start() {
       try {
         var cap = track.getCapabilities ? track.getCapabilities() : {};
         if (cap.focusMode && cap.focusMode.indexOf("continuous") >= 0) track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(function () {});
+        /* ★2026-11-24(2): 2배 확대를 기본으로 켜지 않는다.
+           삼성처럼 렌즈가 여러 개인 폰은 확대하면 망원 렌즈로 넘어가는데, 망원은 가까운 것에 초점을 못 잡아
+           QR 이 흐려졌다(두 번째 스캔부터 "흐릿해서 인식 안 됨"). 확대는 단추로만 켠다. */
         if (cap.zoom && cap.zoom.max >= 1.5) {
           zoomCap = cap.zoom; var zb = document.getElementById("zoom"); zb.style.display = "block";
+          zb.textContent = "🔍 2배 확대";
           zb.onclick = function () { setZoom(!zoomOn); };
-          setZoom(true);
         }
         if (cap.torch) {
           var tb = document.getElementById("torch"); tb.style.display = "block";
