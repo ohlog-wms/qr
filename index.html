@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="ko"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>렉 QR 스캔</title>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<style>
+:root { --bg:#000; --fg:#fff; --accent:#534AB7; }
+* { box-sizing:border-box; margin:0; padding:0; }
+html,body { height:100%; background:var(--bg); color:var(--fg); font-family:sans-serif; overflow:hidden; }
+#v { position:fixed; inset:0; width:100%; height:100%; object-fit:cover; background:#000; }
+#box { position:fixed; left:50%; top:45%; width:62vmin; height:62vmin; transform:translate(-50%,-50%);
+       border:3px solid rgba(255,255,255,.9); border-radius:14px; box-shadow:0 0 0 100vmax rgba(0,0,0,.35); }
+#box.ok { border-color:#3ad07a; }
+#top { position:fixed; left:0; right:0; top:0; padding:14px 16px calc(10px + env(safe-area-inset-top)); text-align:center;
+       font-size:17px; font-weight:bold; background:linear-gradient(rgba(0,0,0,.6),rgba(0,0,0,0)); }
+#msg { position:fixed; left:16px; right:16px; top:calc(45% + 36vmin); text-align:center; font-size:16px; line-height:1.5; }
+#bar { position:fixed; left:0; right:0; bottom:0; display:flex; gap:10px; padding:12px 16px calc(16px + env(safe-area-inset-bottom));
+       background:linear-gradient(rgba(0,0,0,0),rgba(0,0,0,.7)); }
+#bar button { flex:1; font-size:17px; padding:14px 8px; border:0; border-radius:10px; background:#fff; color:#222; }
+#bar button.main { background:var(--accent); color:#fff; }
+#torch { display:none; }
+</style>
+</head><body>
+<video id="v" playsinline muted autoplay></video>
+<div id="box"></div>
+<div id="top">옮길 렉 QR 을 네모 안에 비추세요</div>
+<div id="msg">카메라 켜는 중...</div>
+<div id="bar">
+  <button id="torch" type="button">🔦 불 켜기</button>
+  <button id="back" type="button" class="main">직접 입력으로</button>
+</div>
+<script>
+/* 벌크 재고이동 — 렉 QR 스캔 화면.
+   구글 웹앱 화면 안에서는 카메라가 막혀서, 스캔만 이 화면에서 하고
+   읽으면 재고이동 화면(웹앱)으로 ?loc=렉번호 를 붙여 돌아간다.
+   (재고이동 화면이 적던 줄을 기억하고 있어서, 새 렉이 아래에 붙는다) */
+var APP = "https://script.google.com/macros/s/AKfycbxp_Qs4CUokGnKk6hwmVRHqYh_n8nTZ6FcXnqhbDQ-YOUsd-TuyLwjxVfeIaMOZIImE/exec";
+var v = document.getElementById("v"), msg = document.getElementById("msg"), box = document.getElementById("box");
+var stream = null, det = null, cv = document.createElement("canvas"), done = false, track = null, torchOn = false;
+try { if (window.BarcodeDetector) det = new BarcodeDetector({ formats: ["qr_code"] }); } catch (e) { det = null; }
+
+function parseLoc(txt) {
+  txt = String(txt || "").trim();
+  var m = /[?&]loc=([^&#]+)/.exec(txt);
+  var s = (m ? decodeURIComponent(m[1]) : txt).toUpperCase().trim();
+  return /^[A-Z0-9]{2}-[A-Z0-9]{2}-[0-9]{2}-[0-9]{2}$/.test(s) ? s : "";
+}
+function go(loc) {
+  if (done) return; done = true;
+  box.className = "ok"; msg.textContent = "읽었습니다: " + loc;
+  if (navigator.vibrate) navigator.vibrate(80);
+  try { stream && stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
+  location.replace(APP + (loc ? "?loc=" + encodeURIComponent(loc) : ""));
+}
+document.getElementById("back").onclick = function () { go(""); };
+
+/* 화면 가운데(네모)에 가장 가까운 QR 을 고른다 — 1·2·3단 QR 이 같이 비쳐도 네모 안의 것 */
+function pickCenter(list, W, H) {
+  var best = "", bd = 1e18, other = "";
+  for (var i = 0; i < list.length; i++) {
+    var raw = list[i].rawValue, s = parseLoc(raw);
+    if (!s) { other = raw; continue; }
+    var b = list[i].boundingBox || { x: 0, y: 0, width: 0, height: 0 };
+    var dx = b.x + b.width / 2 - W / 2, dy = b.y + b.height / 2 - H * 0.45, d = dx * dx + dy * dy;
+    if (d < bd) { bd = d; best = s; }
+  }
+  if (!best && other) msg.textContent = "렉 QR 이 아닙니다 — 렉에 붙은 QR 을 비추세요";
+  return best;
+}
+function jsFrame() {
+  if (!window.jsQR) return "";
+  var W = v.videoWidth, H = v.videoHeight; if (!W || !H) return "";
+  /* 화면에 보이는 네모 자리만 잘라 읽는다 */
+  var side = Math.min(W, H) * 0.7, sx = (W - side) / 2, sy = Math.max(0, H * 0.45 - side / 2);
+  var n = Math.min(640, Math.round(side));
+  cv.width = n; cv.height = n;
+  var g = cv.getContext("2d", { willReadFrequently: true });
+  g.drawImage(v, sx, sy, side, side, 0, 0, n, n);
+  var c = jsQR(g.getImageData(0, 0, n, n).data, n, n, { inversionAttempts: "dontInvert" });
+  if (!c) return "";
+  var s = parseLoc(c.data);
+  if (!s) msg.textContent = "렉 QR 이 아닙니다 — 렉에 붙은 QR 을 비추세요";
+  return s;
+}
+function tick() {
+  if (done || !stream) return;
+  if (v.readyState < 2) { setTimeout(tick, 150); return; }
+  var p = det ? det.detect(v).then(function (l) { return pickCenter(l, v.videoWidth, v.videoHeight); }) : Promise.resolve(jsFrame());
+  p.then(function (s) { if (s) go(s); else setTimeout(tick, 150); })
+   .catch(function () { det = null; setTimeout(tick, 200); });
+}
+function start() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    msg.textContent = "이 브라우저에서는 카메라를 쓸 수 없습니다. 크롬이나 삼성 인터넷으로 열어 주세요."; return;
+  }
+  navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false })
+    .then(function (s) {
+      stream = s; v.srcObject = s; var pl = v.play(); if (pl && pl.catch) pl.catch(function () {});
+      msg.textContent = "10~20cm 거리에서 비추세요";
+      track = s.getVideoTracks()[0];
+      try {
+        var cap = track.getCapabilities ? track.getCapabilities() : {};
+        if (cap.torch) {
+          var tb = document.getElementById("torch"); tb.style.display = "block";
+          tb.onclick = function () {
+            torchOn = !torchOn;
+            track.applyConstraints({ advanced: [{ torch: torchOn }] }).catch(function () {});
+            tb.textContent = torchOn ? "🔦 불 끄기" : "🔦 불 켜기";
+          };
+        }
+      } catch (e) {}
+      tick();
+    })
+    .catch(function (e) {
+      var n = e && e.name || "";
+      msg.textContent = n === "NotAllowedError"
+        ? "카메라 허용이 꺼져 있습니다. 주소창 왼쪽 자물쇠 → 권한 → 카메라 '허용' 으로 바꾼 뒤 다시 열어 주세요."
+        : "카메라를 켤 수 없습니다 (" + n + "). 다른 앱이 카메라를 쓰고 있으면 닫고 다시 열어 주세요.";
+    });
+}
+document.addEventListener("visibilitychange", function () {
+  if (document.hidden && stream && !done) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
+  else if (!document.hidden && !stream && !done) start();
+});
+start();
+</script>
+</body></html>
