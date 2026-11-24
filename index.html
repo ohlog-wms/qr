@@ -50,7 +50,8 @@ try { if (window.BarcodeDetector) det = new BarcodeDetector({ formats: ["qr_code
 
 function parseLoc(txt) {
   txt = String(txt || "").trim();
-  var m = /[?&]loc=([^&#]+)/.exec(txt);
+  /* 두 가지 QR 모두 읽는다: …/exec?loc=02-A1-07-00 (지금 라벨) / …github.io/qr/?02-A1-07-00 (짧은 주소 라벨) */
+  var m = /[?&](?:loc=)?([0-9A-Za-z]{2}-[0-9A-Za-z]{2}-[0-9]{2}-[0-9]{2})(?:[&#]|$)/.exec(txt) || /[?&]loc=([^&#]+)/.exec(txt);
   var s = (m ? decodeURIComponent(m[1]) : txt).toUpperCase().trim();
   return /^[A-Z0-9]{2}-[A-Z0-9]{2}-[0-9]{2}-[0-9]{2}$/.test(s) ? s : "";
 }
@@ -62,6 +63,11 @@ function go(loc) {
   location.replace(APP + (loc ? "?loc=" + encodeURIComponent(loc) : ""));
 }
 document.getElementById("back").onclick = function () { go(""); };
+/* 짧은 주소 라벨(…/qr/?02-A1-07-00)을 핸드폰 기본 카메라로 찍고 들어온 경우 → 카메라 안 켜고 바로 재고이동 화면으로 */
+(function () {
+  var q = parseLoc(location.href);
+  if (q) { done = true; msg.textContent = q + " 여는 중..."; location.replace(APP + "?loc=" + encodeURIComponent(q)); }
+})();
 
 var notRack = 0;
 function seen(raw) {   /* 읽긴 했는데 렉 QR 이 아닌 경우 안내 */
@@ -83,14 +89,18 @@ function pickCenter(list, W, H) {
    (jsQR 은 한 장에 QR 이 여러 개 있으면 헷갈려 못 읽는다 → 작게 자르면 가운데 QR 하나만 남는다)
    해상도는 1100px 까지 줄이지 않는다 */
 var CROPS = [0.42, 0.6, 0.8];
+/* ★2026-11-24 실기기(삼성) 캡처: QR 이 네모 안에 있는데 초점이 안 맞아 흐림 → 못 읽음.
+   흐린 사진은 작게 줄이면 오히려 또렷해진다 → 원래 크기 / 작게(360px) 를 번갈아 읽는다. */
 function jsRead(n) {
   if (!window.jsQR) return "";
   var W = v.videoWidth, H = v.videoHeight; if (!W || !H) return "";
-  var side = Math.min(W, H) * CROPS[n % CROPS.length];
+  var combo = n % 6, small = combo >= 3;
+  var side = Math.min(W, H) * CROPS[combo % 3];
   var sx = (W - side) / 2, sy = Math.max(0, Math.min(H - side, H * 0.42 - side / 2)), sw = side, sh = side;
-  var k = Math.min(1, 1100 / Math.max(sw, sh)), w = Math.round(sw * k), h = Math.round(sh * k);
+  var k = Math.min(1, (small ? 360 : 1100) / Math.max(sw, sh)), w = Math.round(sw * k), h = Math.round(sh * k);
   cv.width = w; cv.height = h;
   var g = cv.getContext("2d", { willReadFrequently: true });
+  g.imageSmoothingEnabled = true; g.imageSmoothingQuality = "high";
   g.drawImage(v, sx, sy, sw, sh, 0, 0, w, h);
   var c = jsQR(g.getImageData(0, 0, w, h).data, w, h, { inversionAttempts: "attemptBoth" });
   if (!c) return "";
@@ -106,7 +116,12 @@ function tick() {
     ? det.detect(v).then(function (l) { return pickCenter(l, v.videoWidth, v.videoHeight); })
     : Promise.resolve(jsRead(det ? frame >> 1 : frame));
   p.then(function (s) {
-    if (frame % 10 === 0) info.textContent = engineNote + " · " + v.videoWidth + "x" + v.videoHeight + " · " + frame;
+    if (frame % 10 === 0) info.textContent = engineNote + " · " + v.videoWidth + "x" + v.videoHeight + " · " + frame + (zoomOn ? " · 2배" : "");
+    if (!s && !hinted && Date.now() - t0 > 4000) {
+      hinted = true;
+      msg.innerHTML = "흐리게 보이면 <b>핸드폰을 20~30cm 뒤로</b> 빼세요" + (zoomCap ? " (2배 확대라 QR 은 충분히 크게 보입니다)" : "") + "<br>화면을 톡 누르면 초점을 다시 잡습니다";
+      if (zoomCap && !zoomOn) setZoom(true);
+    }
     if (s) go(s); else setTimeout(tick, 60);
   }).catch(function () { det = null; engineNote = "jsQR"; setTimeout(tick, 100); });
 }
@@ -114,10 +129,38 @@ function setZoom(on) {
   if (!zoomCap || !track) return;
   zoomOn = on;
   var z = on ? Math.min(2, zoomCap.max) : Math.max(1, zoomCap.min);
-  track.applyConstraints({ advanced: [{ zoom: z }] }).catch(function () {});
-  document.getElementById("zoom").textContent = on ? "🔍 확대 끄기" : "🔍 2배 확대";
+  var zb = document.getElementById("zoom");
+  /* 실제로 확대됐는지 확인해서 단추 글씨를 맞춘다 (삼성 인터넷 등은 조용히 무시하기도 함) */
+  track.applyConstraints({ advanced: [{ zoom: z }] }).then(function () {
+    var now = (track.getSettings && track.getSettings().zoom) || 1;
+    zoomOn = now >= 1.5;
+    zb.textContent = zoomOn ? "🔍 확대 중 (끄기)" : "🔍 2배 확대";
+  }).catch(function () { zoomOn = false; zb.textContent = "🔍 2배 확대"; });
+  zb.textContent = on ? "🔍 확대 중 (끄기)" : "🔍 2배 확대";
 }
+/* 화면을 누르면 초점을 다시 잡는다 (지원하는 핸드폰만) */
+var t0 = Date.now(), hinted = false;
+function refocus() {
+  if (!track) return;
+  try {
+    var cap = track.getCapabilities ? track.getCapabilities() : {};
+    var modes = cap.focusMode || [];
+    if (modes.indexOf("single-shot") >= 0) {
+      track.applyConstraints({ advanced: [{ focusMode: "single-shot" }] }).then(function () {
+        if (modes.indexOf("continuous") >= 0) setTimeout(function () { track && track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(function () {}); }, 1500);
+      }).catch(function () {});
+    } else if (modes.indexOf("continuous") >= 0) {
+      track.applyConstraints({ advanced: [{ focusMode: "manual" }] }).catch(function () {}).then(function () {
+        track && track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(function () {});
+      });
+    }
+  } catch (e) {}
+  box.style.borderColor = "#ffd54a"; setTimeout(function () { box.style.borderColor = ""; }, 400);
+}
+v.addEventListener("click", refocus); box.addEventListener("click", refocus);
+box.style.pointerEvents = "auto";
 function start() {
+  if (done) return;
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     msg.textContent = "이 브라우저에서는 카메라를 쓸 수 없습니다. 크롬으로 열어 주세요."; return;
   }
@@ -125,7 +168,7 @@ function start() {
       facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 },
       advanced: [{ focusMode: "continuous" }] } })
     .then(function (s) {
-      stream = s; v.srcObject = s; var pl = v.play(); if (pl && pl.catch) pl.catch(function () {});
+      stream = s; t0 = Date.now(); hinted = false; v.srcObject = s; var pl = v.play(); if (pl && pl.catch) pl.catch(function () {});
       msg.textContent = "QR 을 네모 가득 차게 — 흐리면 조금 떨어뜨리세요";
       engineNote = det ? "크롬인식기+jsQR" : "jsQR";
       track = s.getVideoTracks()[0];
